@@ -459,11 +459,6 @@ contract ScrollChain is OwnableUpgradeable, PausableUpgradeable, IScrollChain {
 
     /// @inheritdoc IScrollChain
     ///
-    /// @dev This function will revert unless all V0/V1/V2 batches are finalized. This is because we start to
-    /// pop L1 messages in `commitBatchWithBlobProof` but not in `commitBatch`. We also introduce `finalizedQueueIndex`
-    /// in `L1MessageQueue`. If one of V0/V1/V2 batches not finalized, `L1MessageQueue.pendingQueueIndex` will not
-    /// match `parentBatchHeader.totalL1MessagePopped` and thus revert.
-    ///
     /// @dev `_skippedL1MessageBitmap` is no longer used, will remove in next version.
     function commitBatchWithBlobProof(
         uint8 _version,
@@ -508,24 +503,31 @@ contract ScrollChain is OwnableUpgradeable, PausableUpgradeable, IScrollChain {
     }
 
     /// @inheritdoc IScrollChain
+    /// @dev If we have state mismatch, security council should resolve it first and re-enable both proof. This
+    /// will prevent malicious zkp verifier or tee verifier.
     function commitAndFinalizeBatch(CommitStruct calldata commitStruct, FinalizeStruct calldata finalizeStruct)
         external
+        whenFinalizeNotPaused(ProofType.ZkProof)
+        whenFinalizeNotPaused(ProofType.TeeProof)
     {
-        //
         EnforcedBatchParameters memory parameters = enforcedBatchParameters;
         if (!parameters.enforcedModeEnabled) {
-            uint256 timestamp = IL1MessageQueue(messageQueue).getFirstUnfinalizedMessageTimestamp();
-            if (timestamp > 0 && timestamp + parameters.maxDelayEnterEnforcedMode < block.timestamp) {
+            uint256 zkpIndex = lastZkpVerifiedBatchIndex;
+            uint256 teeIndex = lastTeeVerifiedBatchIndex;
+            parameters.lastCommittedBatchIndex = zkpIndex < teeIndex ? uint56(zkpIndex) : uint56(teeIndex);
+            // for legacy batches, `commitTimestamp` can be zero, we need to ignore it.
+            uint256 commitTimestamp = batchCommittedTimestamp[parameters.lastCommittedBatchIndex + 1];
+            // for legacy messages, `messageTimestamp` can be zero, we need to ignore it.
+            uint256 messageTimestamp = IL1MessageQueue(messageQueue).getFirstUnfinalizedMessageTimestamp();
+            // enter enforced mode when
+            // 1. batch not finalized for a long time; or
+            // 2. message not finalized for a long time
+            if (
+                (commitTimestamp > 0 && commitTimestamp + parameters.maxDelayEnterEnforcedMode < block.timestamp) ||
+                (messageTimestamp > 0 && messageTimestamp + parameters.maxDelayEnterEnforcedMode < block.timestamp)
+            ) {
                 // explicit set enforce batch enable
                 parameters.enforcedModeEnabled = true;
-                // reset `lastCommittedBatchIndex`
-                uint256 zkpIndex = lastZkpVerifiedBatchIndex;
-                uint256 teeIndex = lastTeeVerifiedBatchIndex;
-                if (zkpIndex < teeIndex) {
-                    parameters.lastCommittedBatchIndex = uint56(zkpIndex);
-                } else {
-                    parameters.lastCommittedBatchIndex = uint56(teeIndex);
-                }
                 enforcedBatchParameters = parameters;
             } else {
                 revert ErrorNotInEnforcedBatchMode();
@@ -540,6 +542,7 @@ contract ScrollChain is OwnableUpgradeable, PausableUpgradeable, IScrollChain {
             commitStruct.blobDataProof
         );
 
+        // check batch hash
         if (batchHash != keccak256(finalizeStruct.batchHeader)) {
             revert ErrorIncorrectBatchHash();
         }

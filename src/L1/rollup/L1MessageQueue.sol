@@ -73,9 +73,8 @@ contract L1MessageQueue is OwnableUpgradeable, IL1MessageQueue {
     /// @dev Mapping from message queue index to enqueue timestamp.
     mapping(uint256 => uint256) private enqueueTimestamp;
 
-    // todo change gap slots
     /// @dev The storage slots for future usage.
-    uint256[40] private __gap;
+    uint256[39] private __gap;
 
     /**********************
      * Function Modifiers *
